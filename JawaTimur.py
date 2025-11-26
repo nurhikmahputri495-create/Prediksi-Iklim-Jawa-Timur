@@ -1,8 +1,11 @@
 if uploaded_file:
-    # ============= 0. Ambil Nama Wilayah dari Nama File =============
-    file_name = uploaded_file.name.replace(".xlsx", "").replace("_", " ")
-    # Ekstraksi "Jawa Timur" dari contoh "Data Jawa Timur_xyz.xlsx"
-    wilayah = " ".join([w for w in file_name.split() if w.lower() not in ["data", "table", "harian"]])
+    # ======================== 0. IDENTIFIKASI WILAYAH ========================
+    file_name = uploaded_file.name.lower()
+
+    if "jawa timur" in file_name or "jatim" in file_name:
+        wilayah = "Jawa Timur"
+    else:
+        wilayah = uploaded_file.name.replace(".xlsx","").replace("_"," ")
 
     st.subheader(f"📍 Data Iklim Wilayah **{wilayah}**")
 
@@ -14,10 +17,14 @@ if uploaded_file:
     # handle duplicate columns
     df = df.loc[:, ~df.columns.duplicated()]
 
+    # mapping nama untuk konsistensi
     if "kecepatan_angin" in df.columns:
         df = df.rename(columns={"kecepatan_angin": "FF_X"})
 
-    df['Tanggal'] = pd.to_datetime(df['Tanggal'], dayfirst=True)
+    # perbaiki parsing tanggal
+    df['Tanggal'] = pd.to_datetime(df['Tanggal'], errors='coerce', dayfirst=True)
+    df = df.dropna(subset=["Tanggal"])
+
     df['Tahun'] = df['Tanggal'].dt.year
     df['Bulan'] = df['Tanggal'].dt.month
 
@@ -47,9 +54,10 @@ if uploaded_file:
     # ================================
     agg_dict = {v:'mean' for v in available_vars}
     if "curah_hujan" in available_vars:
-        agg_dict["curah_hujan"] = "sum"
+        agg_dict["curah_hujan"] = "sum"   # hujan akumulatif
 
     monthly_df = df.groupby(["Tahun","Bulan"]).agg(agg_dict).reset_index()
+    st.subheader("📊 Data Bulanan")
     st.dataframe(monthly_df)
 
     # ================================ 
@@ -72,12 +80,12 @@ if uploaded_file:
             "R2": r2_score(y_ts, pred)
         }
 
-    st.subheader("📈 Evaluasi Model")
+    st.subheader("📈 Evaluasi Model Machine Learning")
     for var,m in metrics.items():
         st.write(f"**{label[var]}** → RMSE: {m['RMSE']:.3f} | R²: {m['R2']:.3f}")
 
     # ================================ 
-    # 5. PREDIKSI AKAN DATANG
+    # 5. PREDIKSI OTOMATIS 2025–2075
     # ================================
     future = pd.DataFrame(
         [(y,m) for y in range(2025,2076) for m in range(1,13)],
@@ -87,29 +95,52 @@ if uploaded_file:
         future[f"Pred_{var}"] = models[var].predict(future[['Tahun','Bulan']])
 
     # ================================ 
-    # 6. GRAFIK OTOMATIS 👇
+    # 6. GABUNG HISTORIS + PREDIKSI
     # ================================
-    st.subheader(f"📊 Grafik Tren Iklim **{wilayah}** (Historis vs Prediksi)")
-
     monthly_df['Sumber'] = 'Historis'
     future['Sumber']  = 'Prediksi'
 
-    full_plot = []
+    merge_list = []
     for var in available_vars:
-        h = monthly_df[['Tahun','Bulan',var,'Sumber']].rename(columns={var:'Nilai'})
-        h['Variabel'] = label[var]
+        hist = monthly_df[['Tahun','Bulan',var,'Sumber']].rename(columns={var:'Nilai'})
+        hist['Variabel'] = label[var]
 
-        p = future[['Tahun','Bulan',f'Pred_{var}','Sumber']].rename(columns={f'Pred_{var}':'Nilai'})
-        p['Variabel'] = label[var]
+        pred = future[['Tahun','Bulan',f'Pred_{var}','Sumber']].rename(columns={f'Pred_{var}':'Nilai'})
+        pred['Variabel'] = label[var]
 
-        full_plot.append(pd.concat([h,p]))
-    full_plot = pd.concat(full_plot)
+        merge_list.append(pd.concat([hist,pred]))
+
+    full_plot = pd.concat(merge_list)
 
     full_plot['Tanggal'] = pd.to_datetime(
         full_plot['Tahun'].astype(str) + "-" + full_plot['Bulan'].astype(str) + "-01"
     )
 
-    chosen = st.selectbox("Pilih Variabel", [label[v] for v in available_vars])
+    # ================================
+    # 6B. GRAFIK OTOMATIS TOP 4
+    # ================================
+    st.subheader("📉 Grafik Otomatis Variabel Utama Jawa Timur")
+
+    default_vars = ["Tavg","Tx","Tn","curah_hujan"]
+    default_vars = [v for v in default_vars if v in available_vars]
+
+    for var in default_vars:
+        subset = full_plot[full_plot["Variabel"] == label[var]]
+        fig_auto = px.line(
+            subset,
+            x="Tanggal",
+            y="Nilai",
+            color="Sumber",
+            title=f"{label[var]} — {wilayah}"
+        )
+        st.plotly_chart(fig_auto, use_container_width=True)
+
+    # ================================ 
+    # 7. GRAFIK PILIH VARIABEL
+    # ================================
+    st.subheader("📊 Grafik Variabel Pilihan")
+
+    chosen = st.selectbox("Pilih Variabel Cuaca", [label[v] for v in available_vars])
 
     fig = px.line(
         full_plot[full_plot['Variabel']==chosen],
@@ -121,7 +152,7 @@ if uploaded_file:
     st.plotly_chart(fig, use_container_width=True)
 
     # ================================ 
-    # 7. DOWNLOAD CSV
+    # 8. DOWNLOAD DATA
     # ================================
     csv = future.to_csv(index=False).encode('utf-8')
     st.download_button(
